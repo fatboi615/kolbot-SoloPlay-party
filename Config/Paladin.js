@@ -529,7 +529,17 @@
     }
 
     // Enigma - Don't make if not Smiter or Hammerdin
-    if (!me.checkItem({ name: sdk.locale.items.Enigma }).have && ["Hammerdin", "Smiter"].includes(SetUp.finalBuild)) {
+    const partyEnigma = (function () {
+      // party goal (Settings/PartyGoals.json): this profile must make Enigma whatever its build
+      try {
+        const g = JSON.parse(FileTools.readText("libs/SoloPlay/Settings/PartyGoals.json"));
+        const t = g && g.targets && g.targets[me.profile.toLowerCase()];
+        return !!(t && t.enigma);
+      } catch (e) {
+        return false;
+      }
+    })();
+    if (!me.checkItem({ name: sdk.locale.items.Enigma }).have && (partyEnigma || ["Hammerdin", "Smiter"].includes(SetUp.finalBuild))) {
       includeIfNotIncluded("SoloPlay/BuildFiles/Runewords/Enigma.js");
     }
 

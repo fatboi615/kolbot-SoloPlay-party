@@ -2863,15 +2863,59 @@
     return n ? n + " rune" : "rune " + classid;
   };
 
+  // Party goal: the profile with "enigma": true in Settings/PartyGoals.json needs Enigma (Jah + Ith + Ber) to host.
+  // Everybody else treats those three runes as spare until it has it, and the leader hands them over first.
+  const ENIGMA_RUNES = [sdk.items.runes.Jah, sdk.items.runes.Ith, sdk.items.runes.Ber];
+  let _goalsFile = null;
+
+  /** profile that needs Enigma for the party (lower case) or "" */
+  const enigmaHolder = function () {
+    try {
+      if (!_goalsFile) _goalsFile = readJSON("libs/SoloPlay/Settings/PartyGoals.json") || {};
+      const t = _goalsFile.targets || {};
+      for (let k in t) {
+        if (t.hasOwnProperty(k) && t[k] && t[k].enigma) return lc(k);
+      }
+    } catch (e) {
+      // ignore
+    }
+    return "";
+  };
+
+  /** does the Enigma holder still lack Enigma */
+  const enigmaStillNeeded = function () {
+    try {
+      const holder = enigmaHolder();
+      if (!holder) return false;
+      if (holder === myProfile) return !me.checkItem({ name: sdk.locale.items.Enigma }).have;
+      const g = Party.readGame(holder);
+      return !(g && g.gear && g.gear.enigma === true);
+    } catch (e) {
+      return false;
+    }
+  };
+
   /** runes we still need for a runeword we have the base for (SoloPlay's own list) */
   const myRuneWants = function () {
+    let out = [];
     try {
-      if (!Config.MakeRunewords) return [];
-      Runewords.buildLists();
-      return Array.isArray(Runewords.needList) ? Runewords.needList.slice(0, 12) : [];
+      if (Config.MakeRunewords) {
+        Runewords.buildLists();
+        Array.isArray(Runewords.needList) && (out = Runewords.needList.slice(0, 12));
+      }
     } catch (e) {
-      return [];
+      out = [];
     }
+    try {
+      if (enigmaHolder() === myProfile && enigmaStillNeeded()) {
+        ENIGMA_RUNES.forEach(function (r) {
+          !me.getItem(r) && out.indexOf(r) === -1 && out.unshift(r);
+        });
+      }
+    } catch (e) {
+      // ignore
+    }
+    return out;
   };
 
   /**
@@ -2893,8 +2937,11 @@
           return i.classid;
         })
         : [];
+      const holder = enigmaHolder();
+      const enigmaNeeded = !!holder && enigmaStillNeeded();
       return (me.findItems(-1, sdk.items.mode.inStorage) || []).filter(function (item) {
         if (item.itemType !== sdk.items.type.Rune) return false;
+        if (enigmaNeeded && ENIGMA_RUNES.indexOf(item.classid) > -1) return holder !== myProfile;
         if (own[item.classid] || wanted.indexOf(item.classid) > -1 || cubeNeeds.indexOf(item.classid) > -1) return false;
         if (Runewords.validGids.indexOf(item.gid) > -1) return false;
         if (typeof Cubing !== "undefined" && Cubing.keepItem(item)) return false;
@@ -2935,7 +2982,11 @@
       info[giver].spares.forEach(function (classid) {
         if (trades.length >= 6) return;
         let to = "";
-        here.forEach(function (m) {
+        const eh = enigmaHolder();
+        if (eh && eh !== giver && info[eh] && ENIGMA_RUNES.indexOf(classid) > -1 && info[eh].wants.indexOf(classid) > -1) {
+          to = eh; // the Enigma rune goes to the one who needs it for the party first
+        }
+        !to && here.forEach(function (m) {
           if (m === giver || !info[m] || info[m].wants.indexOf(classid) === -1) return;
           if (!to || info[m].wants.length < info[to].wants.length) to = m;
         });

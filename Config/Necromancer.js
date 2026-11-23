@@ -248,7 +248,23 @@
     }
       
     // Enigma
-    if (!me.checkItem({ name: sdk.locale.items.Enigma }).have) {
+    // Party goal: the Enigma holder (Settings/PartyGoals.json, "enigma": true) gets the runes first - we don't
+    // collect or make Enigma ourselves until it has its own
+    const partyHolderNeedsEnigma = (function () {
+      try {
+        const g = JSON.parse(FileTools.readText("libs/SoloPlay/Settings/PartyGoals.json"));
+        const t = (g && g.targets) || {};
+        for (let k in t) {
+          if (!t.hasOwnProperty(k) || !t[k] || !t[k].enigma || k.toLowerCase() === me.profile.toLowerCase()) continue;
+          const st = JSON.parse(FileTools.readText("libs/SoloPlay/.soloplay/party/" + k.toLowerCase() + ".game.json"));
+          return !(st && st.gear && st.gear.enigma === true);
+        }
+      } catch (e) {
+        // no party info - behave as usual
+      }
+      return false;
+    })();
+    if (!me.checkItem({ name: sdk.locale.items.Enigma }).have && !partyHolderNeedsEnigma) {
       includeIfNotIncluded("SoloPlay/BuildFiles/Runewords/Enigma.js");
     }
     // Spirit Sword
