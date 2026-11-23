@@ -1,0 +1,16 @@
+{
+  "_note": "Draft gear goals for the party's phases. Resistances are the numbers shown in game in Hell (after the -100 penalty, max 75). 'tolerance' = how far under a minimum still counts as ready. 'enigma' has no tolerance.",
+  "tolerance": 10,
+  "finalLoop": ["andariel", "diablo", "mephisto", "baal"],
+  "phases": [
+    { "name": "1: Sorc geared to taxi", "who": "scl-sorc" },
+    { "name": "2: Pal geared to host Chaos/Baal", "who": "scl-pal" },
+    { "name": "3: Barb and Necro geared out", "who": ["scl-barb", "scl-necro"] }
+  ],
+  "targets": {
+    "scl-sorc":  { "fire": 60, "cold": 60, "light": 60, "poison": 30, "hpmax": 1300, "fcr": 105 },
+    "scl-pal":   { "enigma": true, "fire": 70, "cold": 70, "light": 70, "poison": 40, "hpmax": 1700, "fcr": 75, "fhr": 48 },
+    "scl-barb":  { "fire": 60, "cold": 60, "light": 60, "poison": 30, "hpmax": 1900 },
+    "scl-necro": { "fire": 60, "cold": 60, "light": 60, "poison": 30, "hpmax": 1200 }
+  }
+}

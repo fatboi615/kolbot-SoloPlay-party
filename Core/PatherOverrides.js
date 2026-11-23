@@ -854,6 +854,11 @@ Pather.move = function (target, givenSettings = {}) {
 
           if (fail >= settings.retry) {
             console.log("Failed move: Retry = " + settings.retry);
+            try {
+              global.__stuckGuard && global.__stuckGuard(target);
+            } catch (guardErr) {
+              // ignore
+            }
             break;
           }
         }
@@ -1207,3 +1212,47 @@ Pather.clearToExit = function (currentarea, targetarea, givenSettings = {}) {
   console.info(false, "", "clearToExit");
   return (me.area === targetarea);
 };
+
+/**
+ * Stuck-in-place guard: repeated failed moves while we haven't gone anywhere.
+ * 30s -> hop to a nearby spot, 90s (or 3 hops) -> leave the game cleanly instead of looping until Town.goToTown quits.
+ */
+(function () {
+  const st = { x: 0, y: 0, area: 0, since: 0, fails: 0, hops: 0 };
+  global.__stuckGuard = function (target) {
+    const now = getTickCount();
+    if (st.area !== me.area || getDistance(me.x, me.y, st.x, st.y) > 6 || now - st.since > Time.minutes(3)) {
+      st.x = me.x; st.y = me.y; st.area = me.area; st.since = now; st.fails = 0; st.hops = 0;
+    }
+    st.fails += 1;
+    const stuckFor = now - st.since;
+    if (st.fails < 3 || stuckFor < Time.seconds(30)) return;
+
+    if (st.hops >= 3 || stuckFor > Time.seconds(90)) {
+      console.warn("Stuck guard :: stuck at " + me.x + "," + me.y + " in area " + me.area + " for "
+        + Math.round(stuckFor / 1000) + "s - leaving the game");
+      try {
+        D2Bot.printToConsole(me.profile + " stuck at " + me.x + "," + me.y + " area " + me.area + " - leaving game", sdk.colors.D2Bot.Red);
+      } catch (e) {
+        // ignore
+      }
+      st.since = now; st.fails = 0; st.hops = 0;
+      scriptBroadcast("quit");
+      return;
+    }
+
+    st.hops += 1;
+    console.warn("Stuck guard :: hop " + st.hops + " from " + me.x + "," + me.y);
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = 4 + rand(0, 6);
+      const x = Math.round(me.x + Math.cos(a) * r);
+      const y = Math.round(me.y + Math.sin(a) * r);
+      if (!Attack.validSpot(x, y)) continue;
+      if (Pather.useTeleport() ? Pather.teleportTo(x, y) : Pather.walkTo(x, y)) {
+        st.fails = 0;
+        return;
+      }
+    }
+  };
+})();

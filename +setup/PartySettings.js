@@ -23,7 +23,7 @@
     /**
      * @desc - master switch for party mode. false = every profile plays solo like before.
      */
-    Enabled: false,
+    Enabled: true,
 
     /**
      * @desc - party groups. Format: "leader profile": ["follower profile", "follower profile", ...]
@@ -36,8 +36,10 @@
      *   },
      */
     Groups: {
-      // tip: make the tankiest character the leader - it walks into every fight first
-      // "SCL-PAL": ["SCL-SORC", "SCL-BARB"],
+      // paladin leads (tanky melee goes in first), sorceress follows and fights the pal's targets
+      "SCL-PAL": ["SCL-SORC", "SCL-BARB", "SCL-NECRO"],
+      // group B: eight lightning sorceresses
+      "SCL-SORC1": ["SCL-SORC2", "SCL-SORC3", "SCL-SORC4", "SCL-SORC5", "SCL-SORC6", "SCL-SORC7", "SCL-SORC8"],
     },
 
     /**
@@ -62,19 +64,6 @@
     LeaderLostTimeout: 10,
 
     /**
-     * @desc - when the HOST gets thrown out of the game (chicken, death, disconnect), the others wait this many
-     *   seconds in town for it instead of leaving: the host goes straight back into the same game and carries on
-     *   from the next step, so nobody starts the run over. 0 = everyone leaves right away (old behaviour).
-     */
-    HostRejoinWait: 75,
-
-    /**
-     * @desc - in town with no waypoint to where the one you follow is: wait this many seconds for a party portal
-     *   before walking there (walking can be a long way round, or a closed one like Lut Gholein's palace)
-     */
-    PortalWait: 60,
-
-    /**
      * @desc - a member that hasn't checked in for this many seconds is treated as offline
      *   (the leader won't wait for it and won't lower the difficulty for it)
      */
@@ -97,41 +86,6 @@
      * @desc - helpers move back to whoever they are following when they get further away than this (yards)
      */
     FollowDistance: 7,
-
-    /**
-     * @desc - when the one we're helping keeps failing to move (narrow walkways, temple doors), helpers standing
-     * right next to it step behind it for a few seconds so they're not in the way.
-     * @type {boolean}
-     */
-    MakeWay: true,
-
-    /**
-     * @desc - members hand each other runes: a rune one member needs for a runeword (and its owner has no use for)
-     *   is dropped by the act 1 stash at the start of a game for the one who needs it
-     */
-    ShareRunes: true,
-
-    /**
-     * @desc - a run the host went down in twice in one game is left to the others for this many of its next games
-     *   (someone else who needs it runs it with the host behind them; if nobody does it is skipped). 0 = off
-     */
-    DangerCooldownGames: 3,
-
-    /**
-     * @desc - safety net: when nobody in the game has moved or made progress for this many minutes, leave the game
-     *   and start a fresh one. 0 = off
-     */
-    StallMinutes: 12,
-
-    /**
-     * @desc - one "Game report" line per game in the host's console and a row in d2bs/kolbot/logs/party-report.csv
-     */
-    GameReport: true,
-
-    /**
-     * @desc - take commands from Tools/PartyCommand/Party Command.bat (end, skip <run>, unskip <run>, status)
-     */
-    Commands: true,
 
     /**
      * @desc - when there is no shared target, helpers only clear monsters this close to them (yards).
@@ -200,16 +154,60 @@
     Rush: true,
 
     /**
+     * @desc - during a rush the other members (not the rusher, not the one being rushed) go out and fight next to
+     *   the rusher instead of waiting in town. The rusher drops a town portal at a quiet spot for them.
+     */
+    RushHelp: true,
+
+    /**
+     * @desc - scripts a profile never runs for itself (others who need them still run them)
+     */
+    ProfileSkip: { "scl-necro": ["templeruns"] },
+
+    /**
+     * @desc - quests that behave badly in multiplayer: a follower that still needs one goes straight to solo catch-up
+     *   instead of failing CatchUpAfterFails times in party games first. Script names as in SoloIndex.
+     */
+    SoloQuests: ["cube", "staff", "cows"],
+
+    /**
+     * @desc - log every member's quest state (done/open/needs) each time the host picks the next script
+     *   (logs/party-events-<profile>.log, type "needs")
+     */
+    NeedsLog: true,
+
+    /**
+     * @desc - when the one being helped is below HurtHelpHp % life the helpers stay within HurtHelpDistance of it and
+     *   clear up to HurtHelpRange around it
+     */
+    HurtHelpHp: 70,
+    HurtHelpDistance: 4,
+    HurtHelpRange: 20,
+
+    /**
+     * @desc - quest boss kills wait until everyone who needs the quest is in the area (town trip, not through the
+     *   portal yet): once the boss is below BossHoldHp % life, attacking pauses up to BossHoldSeconds for them.
+     *   0 = off.
+     */
+    BossHoldSeconds: 60,
+    BossHoldHp: 60,
+
+    /**
+     * @desc - true = don't use kolbot's AutoRush (the sorc runs ahead alone). The one who is behind hosts and the
+     *   normal SoloPlay scripts (chaos, andariel, mephisto...) run with the whole party: the teleporter opens a
+     *   portal at the entrance, everyone goes in and clears together. false = the old rush (RushHelp applies).
+     */
+    RushUseScripts: true,
+
+    /**
+     * @desc - rush helpers go back to town when their life drops below this percent, back out at 75%
+     */
+    RushHelpMinHp: 40,
+
+    /**
      * @desc - rush when the one behind is at least this many acts behind everyone else (another difficulty = always)
      */
     RushWhenBehindActs: 1,
-
-    /**
-     * @desc - a rush that hasn't finished after this many minutes per boss (plus one more boss's worth) is stuck:
-     *   kolbot's rush scripts can wait on each other forever when the one being rushed misses the portal. The rush
-     *   game then ends and the party plays normally next game. 0 = no limit.
-     */
-    RushStepMinutes: 5,
 
     /**
      * @desc - profile that does the rushing. "" = the highest level member that can teleport
@@ -230,9 +228,8 @@
     PortalHoldMinutes: 10,
 
     /**
-     * @desc - seconds the runner (whoever is running the script - usually the leader) waits for its helpers when it
-     *   arrives by waypoint/portal or comes back from town, and for Battle Orders. Fights anything that comes close
-     *   while it waits. 0 = don't regroup.
+     * @desc - seconds the leader waits after coming out of town for everyone to gather (and get Battle Orders)
+     *   before carrying on. Never waits with monsters close. 0 = don't regroup.
      */
     GatherWait: 30,
 
@@ -240,13 +237,6 @@
      * @desc - seconds the runner waits when it walks into a boss / quest area (Den, Catacombs 4, Durance 3, Chaos...)
      */
     BossWait: 45,
-
-    /**
-     * @desc - at a boss, wait up to this long (seconds) when a member who still needs that quest isn't there yet
-     * (usually on a town trip). Cheaper than walking the whole area again for a boss that's already dead.
-     * @type {number}
-     */
-    BossWaitNeeders: 90,
 
     /**
      * @desc - if anyone in the party has Battle Orders (barb), they cast it when the party regroups and the
@@ -262,6 +252,6 @@
     /**
      * @desc - extra logging to the D2BotNG console for every party step
      */
-    Debug: false,
+    Debug: true,
   };
 })(module);

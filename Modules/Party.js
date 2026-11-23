@@ -70,6 +70,9 @@
     MaxCatchUpGames: 6,
     Taxi: true,
     TaxiWait: 90,
+    // the taxi stays at the portal it opened (clearing what comes close) until the party comes through, instead
+    // of going back to town and walking through the portal again. Seconds it waits there at most. 0 = old way.
+    TaxiHoldSeconds: 120,
     HostRotation: true,
     HoldAtPortal: true,
     PortalHoldMinutes: 10,
@@ -78,12 +81,35 @@
     // at a boss, wait up to this long when someone who still needs that quest isn't there yet
     // (usually on a town trip) - cheaper than everyone walking the whole area again for a dead boss
     BossWaitNeeders: 90,
+    // the kill of a quest boss waits (up to BossHoldSeconds) until everyone who needs the quest is in the area -
+    // once the boss is below BossHoldHp % life. Someone in town / not through the portal yet would miss the quest.
+    // 0 = off
+    BossHoldSeconds: 60,
+    BossHoldHp: 60,
+    // every bot appends what it does to logs/party-events-<profile>.log (+ a snapshot every EventSnapshotSeconds)
+    // so what the party is doing can be read from one place. 0 = off
+    EventLog: true,
+    // scripts a profile never runs for itself (others who need them still run them): { "scl-necro": ["templeruns"] }
+    ProfileSkip: {},
+    SoloQuests: [],
+    NeedsLog: true,
+    // helpers stay this close / clear this much further while the one they help is below HurtHelpHp % life
+    HurtHelpHp: 70,
+    HurtHelpDistance: 4,
+    HurtHelpRange: 20,
+    EventSnapshotSeconds: 30,
     Rush: true,
     RushWhenBehindActs: 1,
     // a rush that hasn't finished after this many minutes per act-boss (+1 step's worth) is stuck - kolbot's
     // Rushee/AutoRush wait on each other forever when something goes wrong. The rush game ends and normal play
     // resumes. 0 = no limit
     RushStepMinutes: 5,
+    // other members go out and fight next to the rusher during a rush; back to town below RushHelpMinHp % life
+    RushHelp: true,
+    RushHelpMinHp: 40,
+    // true = no kolbot AutoRush: whoever is behind hosts and the normal SoloPlay scripts (chaos, andariel...) run
+    // with the party - the teleporter drops a portal at the entrance, everyone goes in and clears together
+    RushUseScripts: true,
     Rusher: "",
     BattleOrders: true,
     Debug: false,
@@ -153,7 +179,48 @@
     return d === "Highest" ? 2 : DIFFS.indexOf(d);
   };
 
+  // ~~~ event log: logs/party-events-<profile>.log, one tab-separated line per event ~~~
+  const EVENT_FILE = "logs/party-events-" + lc(me.profile) + ".log";
+  let _eventTrimmed = false;
+  const pad2 = function (n) {
+    return (n < 10 ? "0" : "") + n;
+  };
+  /**
+   * @param {string} type - log | snap | hold | death ...
+   * @param {string} msg
+   */
+  const ev = function (type, msg) {
+    if (!settings.EventLog) return;
+    try {
+      if (!_eventTrimmed) {
+        _eventTrimmed = true;
+        // keep the file from growing forever: over ~1 MB keep the newest half
+        if (FileTools.exists(EVENT_FILE)) {
+          let text = String(FileTools.readText(EVENT_FILE) || "");
+          if (text.length > 1000000) {
+            text = text.slice(text.length - 500000);
+            text = text.slice(text.indexOf("\n") + 1);
+            FileTools.writeText(EVENT_FILE, text);
+          }
+        }
+      }
+      const d = new Date();
+      const stamp = d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " "
+        + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+      let where = "";
+      try {
+        where = me.ingame ? getAreaName(me.area) : "oog";
+      } catch (e) {
+        where = "?";
+      }
+      FileTools.appendText(EVENT_FILE, [stamp, lc(me.profile), type, where, String(msg).replace(/[\t\r\n]+/g, " ")].join("\t") + "\n");
+    } catch (e) {
+      // the event log is a nicety - never let it break anything
+    }
+  };
+
   const log = function (msg, toConsole = false) {
+    ev("log", msg);
     console.log("ÿc8[Party]ÿc0 " + msg);
     if (toConsole || settings.Debug) {
       try {
@@ -403,7 +470,7 @@
       soloStarted: (data && data.soloStarted) || 0,
       soloSince: (data && data.soloSince) || 0,
       // quests we gave up on after the catch-up games didn't get them done ("script@difficulty") - not tried again
-      giveUp: (data && Array.isArray(data.giveUp)) ? data.giveUp : [],
+      giveUp: (data && data.hasOwnProperty("giveUp") && Array.isArray(data.giveUp)) ? data.giveUp : [],
     };
   };
 
@@ -442,8 +509,60 @@
   };
 
   /** scripts we've failed often enough in party games to go do them solo */
+  /** quest-state of this character: 1 done, 0 open, -1 unknown */
+  Party.questSnapshot = function () {
+        const out = {};
+        for (let k in questFlags) {
+          if (!questFlags.hasOwnProperty(k)) continue;
+          try {
+            out[k] = typeof me[questFlags[k]] === "boolean" ? (me[questFlags[k]] ? 1 : 0) : -1;
+          } catch (e) {
+            out[k] = -1;
+          }
+        }
+        ["cube", "amulet", "staff", "cows"].forEach(function (k) {
+          try {
+            out[k] = stillNeeds(k) ? 0 : 1;
+          } catch (e) {
+            out[k] = -1;
+          }
+        });
+        return out;
+      };
+
+  let _soloSeedTick = 0;
+  /**
+   * SoloQuests: quests known to misbehave in multiplayer (cube, staff, cows...). A follower that still needs one is put
+   * into catch-up right away, without first failing CatchUpAfterFails times in party games.
+   */
+  const seedSoloQuests = function (data) {
+    try {
+      const forced = Array.isArray(settings.SoloQuests) ? settings.SoloQuests : [];
+      if (!forced.length || !me.ingame || !me.gameReady || Date.now() - _soloSeedTick < 20000) return data;
+      _soloSeedTick = Date.now();
+      let changed = false;
+      forced.forEach(function (script) {
+        if (data.scripts[script] >= settings.CatchUpAfterFails) return;
+        if (gaveUp(script)) return;
+        const needed = questScripts.includes(script) ? questNotDone(script) : stillNeeds(script);
+        if (!needed) return;
+        data.scripts[script] = settings.CatchUpAfterFails;
+        changed = true;
+        log(me.name + " :: " + script + " is a SoloQuest - catching up solo right away", true);
+      });
+      if (changed) {
+        writeStuck(data);
+        _catchUpCache = { tick: 0, value: false };
+      }
+    } catch (e) {
+      // ignore
+    }
+    return data;
+  };
+
   Party.stuckScripts = function () {
     let data = Party.readStuck();
+    if (Party.hostProfile() !== myProfile) data = seedSoloQuests(data);
     return Object.keys(data.scripts).filter(function (s) {
       return data.scripts[s] >= settings.CatchUpAfterFails;
     });
@@ -911,6 +1030,25 @@
       gameSecs: safe(function () {
         return Math.max(0, Math.round((getTickCount() - me.gamestarttime) / 1000));
       }, 0),
+      // gear numbers for the group's goals (see Settings/PartyGoals.json and party_status.py)
+      gear: safe(function () {
+        let enigma = false;
+        try {
+          me.getItemsEx().forEach(function (i) {
+            if (i.isEquipped && !enigma && i.runeword && /enigma/i.test(String(i.fname || ""))) enigma = true;
+          });
+        } catch (e) {
+          enigma = false;
+        }
+        return {
+          fire: me.fireRes, cold: me.coldRes, light: me.lightRes, poison: me.poisonRes,
+          hpmax: me.hpmax, mpmax: me.mpmax,
+          fcr: me.getStat(sdk.stats.FCR), fhr: me.getStat(sdk.stats.FHR),
+          mf: me.getStat(sdk.stats.MagicBonus), enigma: enigma,
+          str: me.getStat(sdk.stats.Strength), dex: me.getStat(sdk.stats.Dexterity),
+        };
+      }, null),
+      quests: Party.questSnapshot(),
       say: _lastSay,
     };
   };
@@ -1081,9 +1219,17 @@
       doneThisPass.clear();
     }
 
+    const never = (function () {
+      const m = settings.ProfileSkip || {};
+      for (let k in m) {
+        if (m.hasOwnProperty(k) && lc(k) === myProfile) return Array.isArray(m[k]) ? m[k] : [m[k]];
+      }
+      return [];
+    })();
     for (let i = Math.max(0, from || 0); i < list.length; i++) {
       const script = list[i];
       if (doneThisPass.has(script)) continue;
+      if (never.includes(script)) continue;
       if (pass > 1 && !SoloIndex.retryList.includes(script)) continue;
       const entry = SoloIndex.index[script];
       if (!entry || typeof entry.shouldRun !== "function") continue;
@@ -1427,7 +1573,7 @@
 
     data.catchUpGames += 1;
     before.forEach(function (script) {
-      if (!questNotDone(script)) {
+      if (!(questScripts.includes(script) ? questNotDone(script) : (Array.isArray(settings.SoloQuests) && settings.SoloQuests.includes(script) && stillNeeds(script)))) {
         delete data.scripts[script];
         log(me.name + " caught up on " + script, true);
       }
@@ -1576,7 +1722,7 @@
       path = _taxiPath.slice(0);
       _taxiPath = null;
       if (me.inArea(area)) {
-        ok = !!Pather.makePortal(!stay);
+        ok = !!Pather.makePortal(!stay && !(settings.TaxiHoldSeconds > 0));
       }
     } catch (e) {
       _taxiPath = null;
@@ -1595,7 +1741,7 @@
     }
 
     // back in town through our own portal so it stays open (making a new one would close it)
-    if (!stay && !me.inTown) {
+    if (!stay && !me.inTown && !(settings.TaxiHoldSeconds > 0 && ok && me.inArea(area))) {
       try {
         Pather.usePortal(null, me.name) || Town.goToTown();
       } catch (e) {
@@ -1603,7 +1749,7 @@
       }
     }
 
-    Party.state.taxi = { step: step, area: area, ready: ok, failed: !ok, path: path };
+    Party.state.taxi = { step: step, area: area, ready: ok, failed: !ok, path: path, readyAt: Date.now() };
     Party.writeGame();
     log(ok ? "Taxi portal is open to " + getAreaName(area) : "Taxi couldn't open a portal to " + getAreaName(area), true);
   };
@@ -2058,6 +2204,22 @@
 
       // they are in town
       if (sdk.areas.Towns.includes(area)) {
+        // we are the taxi and just opened their portal: wait right here for the party to come through
+        const cab = Party.state.taxi;
+        if (settings.TaxiHoldSeconds > 0 && cab && cab.ready && cab.area && !me.inTown && me.inArea(cab.area)
+          && Date.now() - (cab.readyAt || 0) < Time.seconds(settings.TaxiHoldSeconds)) {
+          _holdWatch = _holdWatch || { hp: me.hp };
+          if (defend(_holdWatch, 20)) {
+            if (_taxiHoldLogged !== cab.readyAt) {
+              _taxiHoldLogged = cab.readyAt;
+              ev("hold", "taxi holding at the portal in " + getAreaName(cab.area) + " for " + name);
+            }
+            me.overhead("Party: holding at the taxi portal for " + name);
+            delay(250);
+            return true;
+          }
+          _holdWatch = null;
+        }
         // popped to town in the middle of their script - the meeting point is their portal in the field,
         // not town: wait there (they come back through it) instead of following them in and walking back
         let trip = theirs ? theirs.townTrip : null;
@@ -2174,17 +2336,21 @@
         return true;
       }
 
+      // they're hurt: stay tighter and clear a wider area around them
+      const hurt = !!theirs && theirs.hp > 0 && theirs.hp < settings.HurtHelpHp;
+      const followDist = hurt ? Math.min(settings.FollowDistance, settings.HurtHelpDistance) : settings.FollowDistance;
+
       // 2. no target - stay right on them
-      if (!holdBack && tx && ty && getDistance(me.x, me.y, tx, ty) > settings.FollowDistance) {
+      if (!holdBack && tx && ty && getDistance(me.x, me.y, tx, ty) > followDist) {
         try {
-          Pather.moveNear(tx, ty, Math.max(3, settings.FollowDistance - 3));
+          Pather.moveNear(tx, ty, Math.max(3, followDist - 3));
         } catch (e) {
           // ignore, try again next tick
         }
       }
 
       // 3. only clear what's close (anything attacking us / them) so we don't wander off
-      Attack.clear(settings.AssistRange);
+      Attack.clear(hurt ? Math.max(settings.AssistRange, settings.HurtHelpRange) : settings.AssistRange);
 
       if (needTownFromField()) {
         _lastFieldTownTrip = getTickCount();
@@ -2334,7 +2500,7 @@
    * @returns {{ rushee: string, rusher: string, targetAct: number } | null}
    */
   Party.rushPlan = function () {
-    if (!enabled || !settings.Rush) return null;
+    if (!enabled || !settings.Rush || settings.RushUseScripts) return null;
     const online = members.filter(function (m) {
       return m === myProfile || fresh(Party.readOog(m), Math.min(settings.StaleAfter, 120));
     });
@@ -2391,6 +2557,30 @@
   /** when the rush we're being given counts as stuck (0 = no rush running) */
   let _rushDeadline = 0;
   let _rushQuitAt = 0;
+
+  /** every EventSnapshotSeconds: where we are, life, what we're doing (and a line when we die) */
+  const eventSnapshot = function () {
+    if (!settings.EventLog || !me.ingame || !me.gameReady) return;
+    if (me.dead !== _snapDead) {
+      _snapDead = !!me.dead;
+      _snapDead && ev("death", "died at " + me.x + "," + me.y + " hp " + me.hpPercent + "%");
+    }
+    if (!settings.EventSnapshotSeconds || Date.now() - _snapAt < Time.seconds(settings.EventSnapshotSeconds)) return;
+    _snapAt = Date.now();
+    const st = Party.state || {};
+    const helping = _helping && _helping.profile && Date.now() - (_helping.tick || 0) < 15000 ? _helping.profile : "";
+    ev("snap", "x=" + me.x + " y=" + me.y + " hp=" + me.hpPercent + " mp=" + me.mpPercent
+      + " merc=" + (function () {
+        try {
+          const m = me.getMerc();
+          return m ? Math.round(m.hp * 100 / (m.hpmax || 128)) : "none";
+        } catch (e) {
+          return "?";
+        }
+      })()
+      + " town=" + (me.inTown ? 1 : 0) + " step=" + (st.step || 0) + " script=" + (st.script || "") + " running=" + (st.running || "")
+      + " helping=" + helping + " game=" + (me.gamename || ""));
+  };
 
   /** background worker: end a rush game that's gone nowhere for too long */
   const rushWatchdog = function () {
@@ -2527,6 +2717,7 @@
       return Array.isArray(ls.rushSeqs) && ls.rushSeqs.includes(n);
     });
     _rushChat = true;
+    _rusherRun = true;
     Party.state.running = "rushing " + rusheeName;
     Party.writeGame();
     log("Rushing " + rusheeName + ": " + seqs.join(", "), true);
@@ -2559,9 +2750,45 @@
     } catch (e) {
       // ignore
     }
+    _rusherRun = false;
     Party.state.running = "";
     Party.writeGame();
     return ls.step;
+  };
+
+  /**
+   * Rush helper (we are neither the rusher nor the one being rushed): go out to the rusher and fight next to
+   * it instead of waiting in town. Back to town when we get hurt.
+   * @param {string} rusher
+   * @returns {boolean} true = we are out helping (skip the town wait this round)
+   */
+  const rushHelpTick = function (rusher) {
+    try {
+      const info = Party.readGameFile(rusher);
+      if (!info || !sameGame(info.game) || !Party.inGame(rusher) || info.dead || info.inTown
+        || !info.area || sdk.areas.Towns.includes(info.area)) {
+        _rushAssistFails = 0;
+        return false;
+      }
+      if (!me.accessToAct(sdk.areas.actOf(info.area))) return false;
+      if (_rushHurt) {
+        if (me.hpPercent >= 75) _rushHurt = false;
+        else return false;
+      } else if (me.hpPercent < settings.RushHelpMinHp) {
+        _rushHurt = true;
+        log("Rush help: hurt (" + me.hpPercent + "%) - back to town to recover", true);
+        !me.inTown && Town.goToTown();
+        return false;
+      }
+      Party.state.running = "helping " + (Party.charNameOf(rusher) || rusher) + " rush";
+      const ok = Party.assistTick(rusher);
+      _rushAssistFails = ok ? 0 : _rushAssistFails + 1;
+      // a few failed ticks in a row (can't see them, no portal yet) - give up for now and wait in town
+      return _rushAssistFails < 8;
+    } catch (e) {
+      console.warn("Party :: rush help error - " + (e.message || e));
+      return false;
+    }
   };
 
   /**
@@ -2591,6 +2818,9 @@
         // follow the one being rushed (it changes act first), or the rusher if it got there before us
         let rusherInfo = ls.rusher ? Party.readGame(ls.rusher) : null;
         const act = Math.max(ls.act || 0, (rusherInfo && rusherInfo.inTown && rusherInfo.act) || 0) || me.act;
+        // the rusher is out in the field: join it and fight there
+        if (settings.RushHelp && ls.rusher && ls.rusher !== myProfile && rushHelpTick(ls.rusher)) continue;
+        Party.state.running = "waiting in town (rush)";
         try {
           !me.inTown && Town.goToTown();
           if (me.act !== act && me.accessToAct(act)) {
@@ -3157,6 +3387,23 @@
         const script = list[index];
         pointer = index + 1;
 
+        // quest-state of every member for this script, for comparing desync reports
+        if (settings.NeedsLog) {
+          try {
+            const flagOf = function (q) {
+              return q && q.hasOwnProperty(script) ? (q[script] === 1 ? "done" : q[script] === 0 ? "open" : "n/a") : "n/a";
+            };
+            let parts = [myProfile + "=" + flagOf(Party.questSnapshot()) + (myNeeds.includes(script) ? "(needs)" : "")];
+            for (let f in replies) {
+              let gi = Party.readGame(f);
+              parts.push(f + "=" + flagOf(gi && gi.quests) + (replies[f].includes(script) ? "(needs)" : ""));
+            }
+            ev("needs", "step " + step + " " + script + " | " + parts.join(" "));
+          } catch (e) {
+            // ignore
+          }
+        }
+
         // 3. run
         Object.assign(Party.state, { phase: "run", script: script, needers: needers });
         Party.writeGame();
@@ -3434,6 +3681,14 @@
   let _busyDepth = 0;
   /** keep this many town portals for our own town trips - party portals don't use the last ones */
   const TP_RESERVE = 4;
+  /** we are running kolbot's AutoRush for the leader right now (rush helpers join us in the field) */
+  let _rusherRun = false;
+  let _taxiHoldLogged = 0;
+  let _snapAt = 0;
+  let _snapDead = false;
+  let _rushPortalAt = 0;
+  let _rushHurt = false;
+  let _rushAssistFails = 0;
 
   const tpCharges = function () {
     try {
@@ -3561,6 +3816,62 @@
       ].filter(Boolean);
     }
     return _bossAreas;
+  };
+
+  /**
+   * Quest bosses only count for party members that are in the area when they die. Who still needs this quest
+   * and isn't here (town trip, not through the portal yet)?
+   * @returns {string[]}
+   */
+  /** the monster(s) whose death is the quest, by script - nothing else (seal bosses, minions) gets held */
+  const QUEST_BOSS = {
+    andariel: [156], duriel: [211], mephisto: [242], diablo: [243], baal: [544], bloodraven: [267],
+    radament: [229], izual: [256], summoner: [250], smith: [402], ancients: [540, 541, 542],
+  };
+  let _holdScript = "";
+  const needersAway = function () {
+    let script = "";
+    let needers = [];
+    if (_leaderBusy && _scriptName) {
+      script = _scriptName;
+      needers = (Party.state && Array.isArray(Party.state.needers)) ? Party.state.needers : [];
+    } else if (isFollower) {
+      const ls = Party.readGameFile(leader);
+      if (!ls || !sameGame(ls.game) || ls.phase !== "run") return [];
+      script = ls.script;
+      needers = Array.isArray(ls.needers) ? ls.needers : [];
+    }
+    _holdScript = script;
+    if (!script || !bossQuests.includes(script)) return [];
+    return needers.filter(function (p) {
+      if (p === myProfile || !Party.inGame(p)) return false;
+      const info = Party.readGame(p);
+      return !!info && !info.dead && !!info.ready && info.area !== me.area;
+    });
+  };
+
+  let _bossHold = { gid: -1, since: 0 };
+  let _bossHoldLogged = -1;
+  /** called before every attack: hold the killing blow of a quest boss until the quest's needers are here */
+  const holdBossKill = function (unit) {
+    if (!settings.BossHoldSeconds || !unit || me.inTown || me.dead) return;
+    if (unit.hpPercent > settings.BossHoldHp) return;
+    needersAway(); // sets _holdScript
+    const ids = QUEST_BOSS[_holdScript];
+    if (!ids || !ids.includes(unit.classid)) return;
+    if (_bossHold.gid !== unit.gid) _bossHold = { gid: unit.gid, since: Date.now() };
+    let hp = me.hp;
+    while (Date.now() - _bossHold.since < Time.seconds(settings.BossHoldSeconds) && !me.dead && me.hp >= hp * 0.9
+      && me.hpPercent >= 60 && unit.hp > 0 && Party.keepAlive()) {
+      const away = needersAway();
+      if (!away.length) return;
+      if (_bossHoldLogged !== unit.gid) {
+        _bossHoldLogged = unit.gid;
+        ev("hold", "boss kill held at " + unit.hpPercent + "% for " + away.join(", "));
+      }
+      me.overhead("Party: holding the kill for " + away.join(", "));
+      delay(500);
+    }
   };
 
   /** is it safe to stand still and wait right now (not in the middle of a portal, town trip or TownChicken) */
@@ -3991,6 +4302,11 @@
       if (classAttack && typeof classAttack.doAttack === "function" && !classAttack.__partyHooked) {
         const originalDoAttack = classAttack.doAttack;
         classAttack.doAttack = function (unit) {
+          try {
+            holdBossKill(unit);
+          } catch (e) {
+            // never block an attack over this
+          }
           Party.noteTarget(unit);
           return originalDoAttack.apply(this, arguments);
         };
@@ -4010,10 +4326,34 @@
         isFollower && leaderWatchdog();
         rushWatchdog();
         stallWatchdog();
+        eventSnapshot();
         // no waiting from in here any more - the heartbeat runs inside delay(), which can be the middle of making
         // or taking a portal. The runner only waits at planned moments (see arrive / paceCheck hooks).
       } catch (e) {
         // never let the heartbeat kill the main thread
+      }
+      return true;
+    };
+
+    // rusher: put a town portal down at a quiet spot so the helpers can come and fight with us
+    Worker.runInBackground.rushHelpPortal = function () {
+      try {
+        if (!settings.RushHelp || !_rusherRun || Date.now() - _rushPortalAt < Time.seconds(25)) return true;
+        if (!safeToWait() || me.hpPercent < 50 || monstersNear(25) || tpCharges() <= TP_RESERVE) return true;
+        if (myPortalHere() && Date.now() - _myPortal.tick < Time.seconds(120)) return true;
+        const away = members.filter(function (m) {
+          if (m === myProfile || m === leader || !Party.inGame(m)) return false;
+          const info = Party.readGame(m);
+          if (!info || info.dead || !info.ready) return false;
+          return info.area !== me.area;
+        });
+        if (!away.length) return true;
+        _rushPortalAt = Date.now();
+        if (Pather.makePortal(false)) {
+          log("Rush: portal down in " + getAreaName(me.area) + " for " + away.join(", "));
+        }
+      } catch (e) {
+        // never let this kill the main thread
       }
       return true;
     };
