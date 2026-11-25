@@ -73,6 +73,8 @@ At the end of each game the host prints one line - minutes, runs done, runs left
 If nobody in the game has moved or made progress for `StallMinutes`, each member leaves and the party starts a fresh game. It's there for the stalls nobody thought of.
 
 ## Rush (new characters catch up fast)
+> **Default now: `RushUseScripts: true`.** The rush runs the party's normal quest scripts (taxi to the area, everyone goes in and clears together, the new character gets credit) instead of kolbot's AutoRush chat protocol. The AutoRush description below only applies with `RushUseScripts: false`.
+
 Add a brand new character to a party that's already ahead and it doesn't have to walk every act. When the member furthest behind is at least `RushWhenBehindActs` acts behind everyone else (or everyone else is in a later difficulty), **that character makes the game and the party's teleporter (sorc) rushes it** through the quests it still needs - staff, Summoner, Duriel, Travincal, Mephisto, Diablo - up to the act the rest of the party is in.
 
 - The new character **makes the game on purpose**: quest objects (Tal Rasha's tomb, the Travincal orb, the Durance) follow the game maker, so the one being rushed has to host - otherwise it can't get through the boss portals. This is how kolbot's own rush is built too.
@@ -86,6 +88,26 @@ Add a brand new character to a party that's already ahead and it doesn't have to
 
 ### Stream Overlay (D2BotNG console on stream)
 `Tools\StreamOverlay\console-overlay.html` shows D2BotNG's console like a stream chat box for Streamlabs / OBS: add it as a **Browser Source** (Local file, 480x600). It reads D2BotNG's live console on this PC; accounts, keys and proxies are hidden. Options and steps are in `Tools\StreamOverlay\README.md`.
+
+### Solo quests (multiplayer-weird quests)
+`SoloQuests: ["cube", "staff", "cows"]` lists quests that misbehave in multiplayer. A follower that still needs one goes straight to solo catch-up (no waiting for `CatchUpAfterFails` failures). The host never does. Give-up and `MaxCatchUpGames` still apply. *(Suggested by duellvandezande69 on the forum.)*
+
+### Quest-state log (desync reports)
+Each time the host picks the next script, it logs every member's quest state, e.g. `needs step 12 shenk | scl-barb=done(needs) scl-pal=open ...`, in `logs/party-events-<profile>.log` (type `needs`). The same flags are published in each member's `.soloplay/party/<profile>.game.json` (`quests`). Turn off with `NeedsLog: false`.
+
+### Holding for the party
+- **Taxi hold** (`TaxiHoldSeconds`): the taxi stays by its portal instead of going back to town, so the party can come through.
+- **Boss hold** (`BossHoldSeconds`, `BossHoldHp`): for quest bosses, everyone must be in the area before the kill is finished, so nobody misses the quest.
+- **Hurt helpers** (`HurtHelpHp`): when the one being helped is below that life %, helpers stay close and clear around it.
+
+### Gear goals and phases (`Settings/PartyGoals.json`)
+Optional targets per profile (resists as shown in Hell, hp, fcr/fhr, Enigma) and phases (sorc geared to taxi, pal geared to host, the rest geared out). `party_status.py` shows who is short of what. The profile with `"enigma": true` gets Jah, Ith and Ber from the others first, and the others stop collecting/making Enigma until it has its own.
+
+### Live status and event log
+`EventLog` writes `logs/party-events-<profile>.log` (events plus a snapshot every `EventSnapshotSeconds`). `python party_status.py` summarises all profiles, gear goals, problems and step times from those files.
+
+### Stuck-in-place guard
+Repeated "Failed move" without actually moving: after 30s it hops to a nearby spot, after 3 hops or 90s it leaves the game cleanly.
 
 ### Catch-up mode
 With host rotation the furthest-behind member hosts, so this is only needed when a follower is stuck on a quest but isn't the one furthest behind. When a follower fails the same quest in `CatchUpAfterFails` party games in a row, it switches to **catch-up mode**: it makes its own games and plays normal solo SoloPlay until those quests are done, then rejoins the party. The leader doesn't wait for it meanwhile and keeps making games in the difficulty it needs. After `MaxCatchUpGames` solo games it rejoins anyway.
@@ -172,6 +194,15 @@ Diablo II 1.14d can't scale its window; stretching add-ons like cnc-ddraw rescal
 | `TaxiWait` | 90 | Seconds the others wait in town for the taxi's portal |
 | `CatchUpAfterFails` | 2 | Failed party games on the same quest before a follower goes solo to catch up |
 | `MaxCatchUpGames` | 6 | Most solo catch-up games before rejoining anyway |
+| `SoloQuests` | cube, staff, cows | Quests a follower catches up on solo straight away |
+| `NeedsLog` | true | Log every member's quest state when the host picks a script |
+| `RushUseScripts` | true | Rush with the normal party quest scripts instead of AutoRush |
+| `RushHelp` / `RushHelpMinHp` | true / 40 | Helpers stay with the one being rushed |
+| `TaxiHoldSeconds` | 120 | Taxi waits at its portal this long instead of going to town (0 = old behaviour) |
+| `BossHoldSeconds` / `BossHoldHp` | 60 / 60 | Hold the quest-boss kill until everyone is there |
+| `HurtHelpHp` / `HurtHelpDistance` / `HurtHelpRange` | 70 / 4 / 20 | Helpers stick close when the one helped is hurt |
+| `ProfileSkip` | {} | `{ "profile": ["script"] }` scripts a profile never runs itself |
+| `EventLog` / `EventSnapshotSeconds` | true / 30 | Event log and snapshots |
 | `MaxGameMinutes` | 150 | Hard cap on a party game |
 | `Debug` | false | Print every party step to the D2BotNG console |
 
